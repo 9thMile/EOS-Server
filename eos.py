@@ -32,7 +32,7 @@ import eossql as eoss
 import eosrelays as eosr
 
 #Set Version
-S_Version = "1.1-8"
+S_Version = "1.2-0"
 #Set other global variables
 last_recieved = ''
 EosString = ""
@@ -64,6 +64,7 @@ class Station:
     Broker_Port = ''
     Broker_USN = ''
     Broker_PWD = ''
+    Broker_Client = ''
     ID = 0
     Type = 0
     Error = 0
@@ -148,12 +149,19 @@ class Station:
 
 class BROKER:
     WindSpeed = -99.9
+    HighGust = -99.9
     WindDirection = -99.9
     Pressure_Rel = -99.9
     Temp_Outside = -99.9
+    Temp_DewPoint = -99
+    Humidity_Rel = -99
     Solar_Rad = -99.9
+    Solar_UV = -99
     B_Volts = -99.9
     S_Volts = -99.9
+    C_Temp = -99.9
+    Depth = -99.9
+    Soil = -99.9
     Client = ''
     Address = ''
     Port = ''
@@ -411,22 +419,54 @@ def burstCam(Station):
 
 def publish_mqtt(mqttc, pub_topic, sensor_data):
     global BROKER
+    global eos_log
     try:
         if BROKER.Address <> '':
-            result, BROKER.ID =  mqttc.publish(pub_topic, sensor_data, qos=0, retain=True)
+            
+            result, BROKER.ID =  mqttc.publish(pub_topic, sensor_data, qos=1, retain=True)
             if result == 0:
-                print 'Message Sent ID:' + str(BROKER.ID) + ' --> ' + pub_topic + ' ' + str(sensor_data)
+                eos_log.debug( 'Message Sent ID:' + str(BROKER.ID) + ' --> ' + pub_topic + ' ' + str(sensor_data))
+                ##print 'Message Sent ID:' + str(BROKER.ID) + ' --> ' + pub_topic + ' ' + str(sensor_data)
+            elif result == 4:
+                eos_log.debug( 'Message inflight ID:' + str(BROKER.ID) + ' --> ' + pub_topic + ' ' + str(sensor_data))
+                ##print 'Message inflight ID:' + str(BROKER.ID) + ' --> ' + pub_topic + ' ' + str(sensor_data)
+                time.sleep(2)
             else:
+                eos_log.error('Message Error ' + str(result))
+                time.sleep(5)
                 print 'Message Error ' + str(result)
     except Exception,e:
-        
-        print str(e)
+        eos_log.error("Message Error" + str(e))
+        ##print str(e)
     
 def on_connect(client, userdata, flages, rc):
-    print "CONNACK recieved with code %d." % (rc)
+    global eos_log
+    global BROKER
+    if rc ==0:
+        eos_log.debug("CONNACK recieved with code %d." % (rc))
+
+    elif rc ==1:
+        eos_log.error("Broker connection refused, incorrect protocol")
+        BROKER.Address = ''
+    elif rc == 2:
+        eos_log.error("Broker connection refused, invalid client identifier")
+        BROKER.Address = ''
+    elif rc == 3:
+        eos_log.error("Broker connection refused, server not available")
+        BROKER.Address = ''
+    elif rc == 4:
+        eos_log.error("Broker connection refused, bad username/password")
+        BROKER.Address = ''
+    else:
+        eos_log.error("Broker connection refused, not authorized")
+        BROKER.Address = ''
+
+    ##print "CONNACK recieved with code %d." % (rc)
 
 def on_disconnect(client, userdata, rc):
-    print client + ' disconnected'
+    global eos_log
+    eos_log.info(client + ' disconnected')
+    ##print client + ' disconnected'
 
     
 #===============================================================================
@@ -445,6 +485,7 @@ def main():
     global last_recieved
     global has_db
     global S_Version
+    global eos_log
     EOS_reader = eos_reader()
     stmt = eoss.stmt()
     station = eosu.station()
@@ -491,19 +532,34 @@ def main():
         ##Set up a local cursor to hold data and execute statments
         cur = db.cursor(mdb.cursors.DictCursor)          
         if station.update(Station, db):
-            BROKER.Client = 'EOS_Station'
+            BROKER.Client = Station.Broker_Client
             mqttc = mqtt.Client(BROKER.Client, clean_session=True) 
             if Station.Broker_Address <> '':
-                
-                BROKER.Address = Station.Broker_Address
-                BROKER.Port = Station.Broker_Port
-                
-                mqttc.username_pw_set(Station.Broker_USN,Station.Broker_PWD)
-                mqttc.on_dsconnect = on_disconnect
-                mqttc.on_connect = on_connect
-                mqttc.connect(BROKER.Address, BROKER.Port, keepalive=90)  ##broker
-                mqttc.loop_start()
+                try:
+                    
+                    BROKER.Address = Station.Broker_Address
+                    BROKER.Port = Station.Broker_Port
+                    mqttc.max_inflight_messages_set(50)
+                    mqttc.username_pw_set(Station.Broker_USN,Station.Broker_PWD)
+                    mqttc.on_dsconnect = on_disconnect
+                    mqttc.on_connect = on_connect
+                    mqttc.connect(BROKER.Address, BROKER.Port, keepalive=90)  ##broker
+                    mqttc.loop_start()
+                    eos_log.info("Sending broker messages")
 
+                    publish_mqtt(mqttc, Station.Name + "/Name",Station.Name)
+                    time.sleep(5)
+                    publish_mqtt(mqttc, Station.Name + "/ID",Station.Remote_ID)
+                    time.sleep(5)
+                    publish_mqtt(mqttc, Station.Name + "/Location/Longitude",Station.Longitude)
+                    time.sleep(5)
+                    publish_mqtt(mqttc, Station.Name + "/Location/Latitude",Station.Latitude)
+                    time.sleep(5)
+                    publish_mqtt(mqttc, Station.Name + "/Location/Altitude",str(Station.Altitude))
+                    time.sleep(5)
+                except Exception,e:
+                    eos_log.error("Error Setting up MMQT : " + str(e))
+                    BROKER.Address = ''
             dstart = datetime.now()
             a = []
             if Station.version <> S_Version:
@@ -511,6 +567,8 @@ def main():
                 eos_log.info("Upgraded eos software version - now:" + S_Version)
             else:
                 eos_log.info("Running eos software version : " + S_Version)
+
+            publish_mqtt(mqttc, Station.Name + "/Version/Software/EOS", S_Version)
             ##check new tables and that we have a true connection
             has_db = eoss.MSGLOG(db, a)
             a.append("Update STATION SET INT_VALUE = 0 where LABEL = 'REM_ID'")
@@ -522,7 +580,7 @@ def main():
                         
                     eos_log.info('EOS Server Starting')                    
             if station.NMEAupdate(NMEA, db):
-                eos_log.info("Checked NMEA")  
+                eos_log.debug("Checked NMEA")  
 
         else:
             has_db = False
@@ -599,6 +657,10 @@ def main():
                     if stmt.records(db, 'LOCATION', 0, date_time) == 0:
                         a.append(stmt.location(EOS, date_time))
                         stmt.trimrecords(db, "LOCATION", Station.Location_Count)
+                        publish_mqtt(mqttc, Station.Name + "/Location/Latitude",EOS.LAT)
+                        publish_mqtt(mqttc, Station.Name + "/Location/Longitude",EOS.LONG)
+                        publish_mqtt(mqttc, Station.Name + "/Location/SOG",EOS.SOG)
+                        publish_mqtt(mqttc, Station.Name + "/Location/COG",EOS.COG)
                 except Exception,e:
                     eos_log.error('On Location: ' + str(e))
                     eosp.sendalert(db, 21, Station.date_time, .25, 0, "On Location: " + str(e), Station.App_Token, Station.User_Key)
@@ -613,12 +675,13 @@ def main():
                             a.append(stmt.wind(EOS, Station, date_time))
                             stmt.trimrecords(db, "WIND", Station.Wind_Count)
                             eos_log.debug("Wind Captured :" + a[len(a)-1])
-                            if BROKER.WindSpeed <> EOS.WindSpeed:
-                                publish_mqtt(mqttc, Station.Name + "/Wind/Speed",EOS.WindSpeed)
-                                BROKER.WindSpeed = EOS.WindSpeed
-                            if BROKER.WindDirection <> EOS.WindDirection:
+                            if BROKER.WindSpeed <> round(EOS.WindSpeed_Avg,0):
+                                publish_mqtt(mqttc, Station.Name + "/Wind/Speed",EOS.WindSpeed_Avg)
+                                BROKER.WindSpeed = round(EOS.WindSpeed_Avg,0)
+                               
+                            if BROKER.WindDirection <> round(EOS.WindDirection,0):
                                 publish_mqtt(mqttc, Station.Name + "/Wind/Direction",EOS.WindDirection)
-                                BROKER.WindDirection = EOS.WindDirection
+                                BROKER.WindDirection = round(EOS.WindDirection,0)
                         if Station.Burst_On == True and EOS.WindSpeed > 1 and Sentence.Wind <> row['SENTENCE']:
                             ##responce,status,reason,message = eosp.sendBurst('WIND',row['SENTENCE'][15:], Station.Remote_ID, Station.Remote_Conn, Station.Remote_Burst)
                             bb.append('WIND:' + row['SENTENCE'][15:])
@@ -640,9 +703,11 @@ def main():
                                 a.append(stmt.pressure(EOS, date_time))
                                 stmt.trimrecords(db, "PRESSURE", Station.Pressure_Count)
                                 eos_log.debug("Pressure Captured :" + a[len(a)-1])
-                                if BROKER.Pressure_Rel <> EOS.Pressure_Rel:
+                                if BROKER.Pressure_Rel <> round(EOS.Pressure_Rel,0):
                                     publish_mqtt(mqttc, Station.Name + "/Pressure/Relative",EOS.Pressure_Rel)
-                                    BROKER.Pressure_Rel = EOS.Pressure_Rel
+                                    publish_mqtt(mqttc, Station.Name + "/Pressure/Absolute",EOS.Pressure_Abs)
+                                    publish_mqtt(mqttc, Station.Name + "/Pressure/Trend",eosu.pressure.trend(EOS.Pressure_Trend))
+                                    BROKER.Pressure_Rel = round(EOS.Pressure_Rel,0)
                         if Station.Burst_On == True and Sentence.Pressure <> row['SENTENCE']:
                             ##responce,status,reason,message = eosp.sendBurst('PRESSURE',row['SENTENCE'][15:], Station.Remote_ID, Station.Remote_Conn, Station.Remote_Burst)
                             bb.append('PRESSURE:' + row['SENTENCE'][15:])
@@ -663,9 +728,17 @@ def main():
                                 a.append(stmt.temp(EOS, date_time))
                                 stmt.trimrecords(db, "TEMP", Station.Temp_Count)
                                 eos_log.debug("Temp Captured :" + a[len(a)-1])
-                                if BROKER.Temp_Outside <> EOS.Temp_Outside:
+                                if BROKER.Temp_Outside <> round(EOS.Temp_Outside,0):
                                     publish_mqtt(mqttc, Station.Name + "/Temp/Outside",EOS.Temp_Outside)
-                                    BROKER.Temp_Outside = EOS.Temp_Outside
+                                    BROKER.Temp_Outside = round(EOS.Temp_Outside,0)
+                                if BROKER.Temp_DewPoint<> round(EOS.Temp_DewPoint,0):
+                                    publish_mqtt(mqttc, Station.Name + "/Temp/Dewpoint",EOS.Temp_DewPoint)
+                                    BROKER.Temp_DewPoint= round(EOS.Temp_DewPoint,0)
+                                if BROKER.Humidity_Rel <> round(EOS.Humidity_Rel,0):
+                                    publish_mqtt(mqttc, Station.Name + "/Temp/Humidity",EOS.Humidity_Rel)
+                                    BROKER.Humidity_Rel = round(EOS.Humidity_Rel,0)
+
+
                         if Station.Burst_On == True and Sentence.Temp <> row['SENTENCE']:
                             ##responce,status,reason,message = eosp.sendBurst('TEMP',row['SENTENCE'][15:], Station.Remote_ID, Station.Remote_Conn, Station.Remote_Burst)
                             bb.append('TEMP:' + row['SENTENCE'][15:])
@@ -720,9 +793,12 @@ def main():
                                 a.append(stmt.solar(EOS, date_time))
                                 stmt.trimrecords(db, "SOLAR", Station.Solar_Count)
                                 eos_log.debug("Solar Captured :" + a[len(a)-1])
-                                if BROKER.Solar_Rad <> EOS.Solar_Rad:
+                                if BROKER.Solar_Rad <> round(EOS.Solar_Rad,0):
                                     publish_mqtt(mqttc, Station.Name + "/Solar/Radiation",EOS.Solar_Rad)
-                                    BROKER.Solar_Rad = EOS.Solar_Rad
+                                    BROKER.Solar_Rad = round(EOS.Solar_Rad,0)
+                                if BROKER.Solar_UV <> EOS.Solar_UV:
+                                    publish_mqtt(mqttc, Station.Name + "/Solar/UV",EOS.Solar_UV)
+                                    BROKER.Solar_UV = EOS.Solar_UV
                         if eosp.sendalarm(db, 5, Station.date_time, 1, EOS.Solar_UV, Station.App_Token, Station.User_Key):
                             eos_log.info("Solar alarm set")
                         if Station.Burst_On == True and Sentence.Solar <> row['SENTENCE']:
@@ -744,12 +820,16 @@ def main():
                                 a.append(stmt.board(EOS, Station, date_time))
                                 stmt.trimrecords(db, "BOARD", Station.Board_Count)
                                 eos_log.debug("Board Captured :" + a[len(a)-1])
-                                if BROKER.B_Volts <> EOS.B_Volts:
+                                if BROKER.B_Volts <> round(EOS.B_Volts,0) and EOS.B_Volts > 5:
                                     publish_mqtt(mqttc, Station.Name + "/Board/Battery",EOS.B_Volts)
-                                    BROKER.B_Volts = EOS.B_Volts
-                                if BROKER.S_VOLTS <> EOS.S_Volts:
+                                    BROKER.B_Volts = round(EOS.B_Volts,0)
+                                if BROKER.S_Volts <> round(EOS.S_Volts,0) and EOS.S_Volts > 5:
                                     publish_mqtt(mqttc, Station.Name + "/Board/Source",EOS.S_Volts)
-                                    BROKER.S_Volts = EOS.S_Volts
+                                    BROKER.S_Volts = round(EOS.S_Volts,0)
+                                if BROKER.C_Temp <> round(EOS.C_Temp,0):
+                                    publish_mqtt(mqttc, Station.Name + "/Board/Temp",EOS.C_Temp)
+                                    publish_mqtt(mqttc, Station.Name + "/Version/Firmware",EOS.Version)
+                                    BROKER.C_Temp = round(EOS.C_Temp,0)
                         if Station.Burst_On == True and Sentence.Board <> row['SENTENCE']:
                             ##responce,status,reason,message = eosp.sendBurst('BOARD',row['SENTENCE'][15:], Station.Remote_ID, Station.Remote_Conn, Station.Remote_Burst)
                             bb.append('BOARD:' + row['SENTENCE'][15:])
@@ -784,6 +864,7 @@ def main():
                             ##fix for bad data when sensor is exposed to air
                             if EOS.Depth > Station.HHWL * 2:
                                 EOS.Depth = 0
+                            
                             a.append(stmt.depth(EOS, date_time))
                             stmt.trimrecords(db, "DEPTH", Station.Depth_Count)
                             eos_log.debug("Depth Captured :" + a[len(a)-1])
@@ -909,7 +990,11 @@ def main():
                         try:
                             if Station.Wind_Count >0:
                                 stmt.windarch(AOS, dstart, dInt, db)
-                                eos_log.debug("Wind Archive completed")          
+                                eos_log.debug("Wind Archive completed")
+                                publish_mqtt(mqttc, Station.Name + "/Wind/Average", AOS.w_avg)
+                                publish_mqtt(mqttc, Station.Name + "/Wind/Rose", AOS.w_rose)
+                                publish_mqtt(mqttc, Station.Name + "/Wind/Gust", AOS.g_max)
+                                publish_mqtt(mqttc, Station.Name + "/Wind/WindRun", AOS.windrun)
                         except Exception,e:
                             eos_log.error('Archive: Wind : ' + str(e))
                             eosp.sendalert(db, 22, Station.date_time, .25, 0, "On Archive Wind: " + str(e), Station.App_Token, Station.User_Key)                            
@@ -945,6 +1030,8 @@ def main():
                                 stmt.solararch(AOS, dstart, dend, sunrise, dInt, db)
                                 eos_log.debug("Solar Archive completed")
                                 publish_mqtt(mqttc, Station.Name + "/Solar/RadiationAverage", AOS.sr_avg)
+                                publish_mqtt(mqttc, Station.Name + "/Solar/SolarMax", AOS.solarmax)
+                                publish_mqtt(mqttc, Station.Name + "/Solar/Cloudy", AOS.cloudy)
                         except Exception,e:
                             eos_log.error('Archive: Solar : ' + str(e))
                             eosp.sendalert(db, 22, Station.date_time, .25, 0, "On Archive Solar: " + str(e), Station.App_Token, Station.User_Key)                                 
@@ -1029,6 +1116,8 @@ def main():
                                 if a <> '':
                                     aa.append("INSERT INTO SOIL_DATA VALUES " + a)
                                     eos_log.debug("Soil Archive completed")
+                                    publish_mqtt(mqttc, Station.Name + "/Soil/Temperature", AOS.stemp)
+                                    publish_mqtt(mqttc, Station.Name + "/Soil/Moisture", AOS.smoisture)
                                     
                         except Exception,e:
                             eos_log.error('Inserting Soil Archive data : ' + str(e))
@@ -1042,7 +1131,10 @@ def main():
                                 if a <> '':
                                     aa.append("INSERT INTO DEPTH_DATA VALUES " + a)
                                     eos_log.debug("Depth Archive completed")
+                                    publish_mqtt(mqttc, Station.Name + "/Tide/Depth", AOS.tide)
+                                    publish_mqtt(mqttc, Station.Name + "/Tide/HHWL", Station.HHWL)
 
+    
                         except Exception,e:
                             eos_log.error('Inserting Depth Archive data : ' + str(e))
                             eosp.sendalert(db, 22, Station.date_time, .25, 0, "On Depth Archive data: " + str(e), Station.App_Token, Station.User_Key)                            
@@ -1266,8 +1358,11 @@ def main():
                             a = []
                             if Station.Wind_Count> 0:
                                 if Station.Alarm_Wind:
-                                    if eosp.sendalarm(db, 1, dend, 4, AOS.w_max, Station.App_Token, Station.User_Key):                                        
+                                    if eosp.sendalarm(db, 1, dend, 4, AOS.w_max, Station.App_Token, Station.User_Key):
+                                        publish_mqtt(mqttc, Station.Name + "/Alarm/Wind", AOS.w_max)
                                         eos_log.info("Wind speed alarm set")
+                                    else:
+                                        publish_mqtt(mqttc, Station.Name + "/Alarm/Wind", '---')
                                 #Turn fan on/off via EOR script if we have wind and solar wind < 5kps and sun > 300 
                                 if Station.Has_Fan:
                                     if float(AOS.w_avg) < 5 and float(AOS.sh_max) > 300:
@@ -1288,7 +1383,10 @@ def main():
                                 if Station.Alarm_Pressure:
                                     if (EOS.Pressure_Trend == 4 or EOS.Pressure_Trend == 5):
                                         if eosp.sendalarm(db, 7, Station.date_time, 4, AOS.p_avg, Station.App_Token, Station.User_Key):
+                                            publish_mqtt(mqttc, Station.Name + "/Alarm/Pressure", AOS.p_avg)
                                             eos_log.info("Pressure drop alarm sent")
+                                else:
+                                    publish_mqtt(mqttc, Station.Name + "/Alarm/Pressure", '---')
                             else:
                                 a.append(stmt.delete(Station.Pressure))
                                 a.append("DELETE from PRESSURE")
@@ -1303,6 +1401,9 @@ def main():
                                         eos_log.info("THWS alarm sent")
                                     if eosp.sendalarm(db, 8, dend, 4, AOS.t_avg, Station.App_Token, Station.User_Key):
                                         eos_log.info("Temperature alarm sent")
+                                        publish_mqtt(mqttc, Station.Name + "/Alarm/Temperature", AOS.t_avg)
+                                    else:
+                                        publish_mqtt(mqttc, Station.Name + "/Alarm/Temperature", '---')
                             else:
                                 a.append(stmt.delete(Station.Temp))
                                 a.append("DELETE from TEMP")
@@ -1321,6 +1422,9 @@ def main():
                                         if float(AOS.v_battery) <= Station.Alarm_Volts:
                                             if eosp.sendalarm(db, 9, dend, 4 , AOS.v_battery , Station.App_Token, Station.User_Key):
                                                 eos_log.info("Voltage alarm sent :" + str(AOS.v_battery) + " volts")
+                                                publish_mqtt(mqttc, Station.Name + "/Alarm/Volts", AOS.v_battery)
+                                        else:
+                                            publish_mqtt(mqttc, Station.Name + "/Alarm/Volts", '---')
                             else:
                                 a.append(stmt.delete(Station.Board))
                                 a.append("DELETE from BOARD")
@@ -1363,6 +1467,30 @@ def main():
                             for row in cur.fetchall():
                                 if row is not None:
                                     aa.append(stmt.core_date(AOS, row))
+                                    if BROKER.Address <> '':
+                                        if Station.Temp_Count > 0:
+                                            publish_mqtt(mqttc, Station.Name + "/Temp/Daily/Hi", str(row["TEMP_HI"]))
+                                            publish_mqtt(mqttc, Station.Name + "/Temp/Daily/Low", str(row["TEMP_LOW"]))
+                                            publish_mqtt(mqttc, Station.Name + "/Temp/Daily/Average", str(row["TEMP_AVG"]))
+                                            publish_mqtt(mqttc, Station.Name + "/Temp/Daily/Humidity", str(row["HUM_AVG"]))
+                                            publish_mqtt(mqttc, Station.Name + "/Temp/Daily/Dewpoint", str(row["DEW_AVG"]))
+                                            publish_mqtt(mqttc, Station.Name + "/Daily/Heat", str(row["HEAT_DD"]))
+                                            publish_mqtt(mqttc, Station.Name + "/Daily/Cool", str(row["COOL_DD"]))                                            
+                                        if Station.Wind_Count > 0:
+                                            publish_mqtt(mqttc, Station.Name + "/Temp/Daily/Windchill", str(row["WIND_CHILL"]))
+                                            publish_mqtt(mqttc, Station.Name + "/Wind/Daily/Average", str(row["WIND_AVG"]))
+                                            publish_mqtt(mqttc, Station.Name + "/Wind/Daily/Hi", str(row["WIND_HI"]))
+                                            publish_mqtt(mqttc, Station.Name + "/Wind/Daily/Run", str(row["WIND_RUN"]))
+                                        if Station.Pressure_Count > 0:
+                                            publish_mqtt(mqttc, Station.Name + "/Pressure/Daily/Average", str(row["BAR"]))
+                                            publish_mqtt(mqttc, Station.Name + "/Pressure/Daily/Hi", str(row["BAR_HI"]))
+                                            publish_mqtt(mqttc, Station.Name + "/Pressure/Daily/Low", str(row["BAR_LOW"]))
+                                        if Station.Solar_Count > 0:
+                                            publish_mqtt(mqttc, Station.Name + "/Solar/Daily/RadHi", str(row["SOLAR_RAD_HI"]))
+                                            publish_mqtt(mqttc, Station.Name + "/Solar/Daily/Energy", str(row["SOLAR_ENERGY"]))
+
+                                        
+                                    
                                     if Station.Wind_Count > 0:
                                         cur.execute("SELECT COUNT(WIND_DIR), WIND_DIR FROM CORE_DATA WHERE WE_DATE = '" + AOS.we_date + "' GROUP BY WIND_DIR ORDER BY COUNT(WIND_DIR) DESC LIMIT 0,1")
                                         for row in cur.fetchall():
@@ -1397,6 +1525,7 @@ def main():
                                             sunhr = round(suncount * t.minute / 60,2)
                                         aa.append("Update CORE_DATE Set SUN_HRS = '" \
                                             + str(sunhr) + "' where WE_DATE = '" + AOS.we_date + "'")
+                                        publish_mqtt(mqttc, Station.Name + "/Solar/Daily/Sunlight", str(sunhr))
                                     
 #===============================================================================
 #                    INSERT DAILY SUMMARY
