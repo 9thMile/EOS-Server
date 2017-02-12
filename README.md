@@ -1,4 +1,4 @@
-d # EOS-Server
+# EOS-Server
 This is a python script to process data for the EOS weather system. It is normally run on the station (https://www.raspberrypi.org/) and will store all climate data into a MYSQL database (https://www.mysql.com/). Other systems/websites can access this data directly from the station database.
 
 The service will also push weather data to various external sites like weatherunderground, pushover notifications and other weather reporting sites including our own remote cloud service to remotely archive the data.
